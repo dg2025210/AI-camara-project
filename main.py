@@ -4,12 +4,12 @@ import neopixel
 import math
 
 # ==========================================
-# 0. 개발용 테스트 설정 (중요!)
+# 0. 개발용 테스트 설정 (손 감지 테스트 가능)
 # ==========================================
-# True로 설정하면 허스키렌즈에 물체를 "학습(Learn)"시키지 않아도,
-# 화면에 아무 네모 상자(ID 0 포함)나 보이면 즉시 LED가 작동하여 테스트하기 편합니다.
+# True로 설정하면 학습 안 된 물체(ID 0)도 무조건 인식하여 테스트가 쉬워집니다.
+# 단, 1번 설명처럼 허스키렌즈 화면에 '네모 박스'가 반드시 뜨고 있어야 작동합니다!
 TEST_MODE_ANY_OBJECT = True 
-PERSON_ID = 1  # 테스트 모드가 False일 때만 감지할 목표 ID (학습된 대상)
+PERSON_ID = 1  # 테스트 모드가 False일 때만 인식할 ID (기본 사람 ID는 1)
 
 # ==========================================
 # 1. 하드웨어 및 네오픽셀 설정 (GP16 사용)
@@ -22,7 +22,7 @@ np = neopixel.NeoPixel(Pin(NEO_PIN), NUM_LEDS)
 i2c_bus = I2C(1, sda=Pin(6), scl=Pin(7), freq=100000)
 
 # ==========================================
-# 2. 허스키렌즈 I2C 통신 클래스 (패킷 길이 수정 완료)
+# 2. 허스키렌즈 초정밀 동적 I2C 통신 클래스
 # ==========================================
 class HuskyLensI2C:
     def __init__(self, i2c_bus, address=0x32):
@@ -30,81 +30,89 @@ class HuskyLensI2C:
         self.address = address
         
     def get_blocks(self):
-        """허스키렌즈로부터 화면상에 감지된 객체 정보를 가져옵니다."""
-        # 1. 데이터 요청 명령 전송
+        """허스키렌즈로부터 dynamic packet-length 방식으로 정교하게 데이터를 수집합니다."""
+        # 데이터 요청 명령어 (COMMAND_REQUEST = 0x20)
         cmd = bytearray([0x55, 0xAA, 0x11, 0x00, 0x20, 0x30])
         try:
             self.i2c.writeto(self.address, cmd)
-            time.sleep_ms(20) # 허스키렌즈 처리 대기
+            time.sleep_ms(30)  # 허스키렌즈가 응답을 계산할 시간을 충분히 줍니다.
             
-            # 2. 응답 헤더 및 정보 패킷 읽기 (기존 10바이트 -> 16바이트로 수정!)
-            info = self.i2c.readfrom(self.address, 16)
-            if len(info) < 16 or info[0] != 0x55 or info[1] != 0xAA:
+            # [단계 1] 최초 5바이트(헤더 3바이트 + 데이터 길이 1바이트 + 명령어 1바이트) 읽기
+            info_header = self.i2c.readfrom(self.address, 5)
+            if len(info_header) < 5 or info_header[0] != 0x55 or info_header[1] != 0xAA:
                 return []
+                
+            # [단계 2] 수신한 정보 창에 적힌 데이터 길이만큼 정확히 추가 수신 (길이 + 체크섬 1바이트)
+            info_payload_len = info_header[3]
+            info_payload = self.i2c.readfrom(self.address, info_payload_len + 1)
             
-            # 감지된 블록 수 계산 (5, 6번째 바이트 사용)
-            num_blocks = info[5] + (info[6] << 8)
+            # [단계 3] 감지된 물체의 총 개수 계산 (INFO 패킷 파싱)
+            num_objects = info_payload[0] + (info_payload[1] << 8)
             blocks = []
             
-            # 3. 각 블록 데이터 읽기 (블록당 16바이트)
-            for _ in range(num_blocks):
-                block_data = self.i2c.readfrom(self.address, 16)
-                if len(block_data) == 16 and block_data[4] == 0x2A: # 0x2A: COMMAND_RETURN_BLOCK
-                    x = block_data[5] + (block_data[6] << 8)
-                    y = block_data[7] + (block_data[8] << 8)
-                    w = block_data[9] + (block_data[10] << 8)
-                    h = block_data[11] + (block_data[12] << 8)
-                    id_val = block_data[13] + (block_data[14] << 8)
+            # [단계 4] 물체 개수만큼 반복하여 각각의 블록 데이터 읽기
+            for _ in range(num_objects):
+                # 블록 헤더 5바이트 수신
+                blk_header = self.i2c.readfrom(self.address, 5)
+                if len(blk_header) < 5:
+                    continue
+                # 블록의 실제 데이터 수신 (길이 + 체크섬 1바이트)
+                blk_payload_len = blk_header[3]
+                blk_payload = self.i2c.readfrom(self.address, blk_payload_len + 1)
+                
+                # COMMAND_RETURN_BLOCK (0x2A) 데이터 분석
+                if blk_header[4] == 0x2A:
+                    x = blk_payload[0] + (blk_payload[1] << 8)
+                    y = blk_payload[2] + (blk_payload[3] << 8)
+                    w = blk_payload[4] + (blk_payload[5] << 8)
+                    h = blk_payload[6] + (blk_payload[7] << 8)
+                    id_val = blk_payload[8] + (blk_payload[9] << 8)
                     
                     blocks.append({
                         'x': x, 'y': y, 'width': w, 'height': h, 'id': id_val
                     })
             return blocks
         except Exception as e:
-            # 통신 중 오류가 났을 때 어떤 오류인지 Thonny 셸에 출력
-            # print("I2C 에러:", e) 
+            # 에러 발생 시 Thonny 셸에 에러 표시 (연결선 단선 확인용)
+            # print("I2C 통신 오류:", e)
             return []
 
 lens = HuskyLensI2C(i2c_bus)
 
 # ==========================================
-# 3. 비차단형(Non-blocking) 네오픽셀 연출 함수들
+# 3. 비차단형 네오픽셀 연출 함수들
 # ==========================================
 def set_all_color(r, g, b):
-    """모든 LED를 지정한 색상으로 설정"""
     for i in range(NUM_LEDS):
         np[i] = (r, g, b)
     np.write()
 
 def show_breathing_orange():
-    """[2단계] 사용자 알림용 주황색 숨쉬기 연출 (LED 0, 1, 2번 사용)"""
-    pulse = (math.sin(time.ticks_ms() / 400) + 1) / 2  # 0.0 ~ 1.0 사이 값 생성
+    """[2단계] 양보 권고: 주황색 숨쉬기 (LED 0, 1, 2)"""
+    pulse = (math.sin(time.ticks_ms() / 400) + 1) / 2
     r = int(255 * pulse)
     g = int(90 * pulse)
     b = 0
     
-    # 0, 1, 2번은 주황색 펄스
     for i in range(3):
         np[i] = (r, g, b)
-    # 나머지는 연한 초록색 상태 표시
     for i in range(3, NUM_LEDS):
-        np[i] = (0, 10, 0)
+        np[i] = (0, 10, 0) # 평상시 상태 표시등
     np.write()
 
 def show_strobe_red():
-    """[3단계] 긴급 비상용 빨간색 초고속 깜빡이 연출 (전체 LED 사용)"""
+    """[3단계] 긴급 비상: 빨간색 초고속 깜빡이"""
     if (time.ticks_ms() // 100) % 2 == 0:
-        set_all_color(255, 0, 0) # 전체 밝은 빨간색
+        set_all_color(255, 0, 0)
     else:
-        set_all_color(0, 0, 0)   # 일시 소등
+        set_all_color(0, 0, 0)
 
 # ==========================================
 # 4. 실시간 상태 감지 및 메인 루프
 # ==========================================
 waiting_start_time = None
-
-print("수정된 안전 시스템 작동 시작...")
-set_all_color(0, 50, 100) # 대기 상태 (하늘색)로 시작
+print("초정밀 3단계 감지 시스템 가동 완료 (SDA=GP6, SCL=GP7)...")
+set_all_color(0, 50, 100) # 대기 상태 (하늘색)
 
 while True:
     blocks = lens.get_blocks()
@@ -113,41 +121,35 @@ while True:
     follow_detected = False
     
     for obj in blocks:
-        # TEST_MODE_ANY_OBJECT가 True이면 모든 물체(ID >= 0)를 대상으로 감지하고,
-        # False이면 오직 등록된 특정 ID만 추적합니다.
         if TEST_MODE_ANY_OBJECT or (obj['id'] == PERSON_ID):
             width = obj['width']
-            # print(f"감지된 물체 크기(width): {width}") # 모니터링용 출력
+            # 디버깅용 로그: Thonny 화면 하단에 인식된 물체의 폭 출력
+            print(f"물체 감지됨! 너비(width): {width} 픽셀")
             
-            # [조건 1] 충돌 위험: 너무 가깝거나 빠른 접근
             if width > 120:
                 danger_detected = True
                 break
-                
-            # [조건 2] 양보 권고 대상: 좁은 길 정체 유발 거리
             elif 70 <= width <= 120:
                 follow_detected = True
 
-    # 4초 누적 대기 상태 판정 (비차단형 타이머)
+    # 4초 누적 대기 알고리즘
     is_waiting = False
     if follow_detected and not danger_detected:
         if waiting_start_time is None:
             waiting_start_time = time.ticks_ms()
         else:
             elapsed = time.ticks_diff(time.ticks_ms(), waiting_start_time)
-            if elapsed >= 4000: # 4초 유지
+            if elapsed >= 4000:
                 is_waiting = True
     else:
         waiting_start_time = None
 
-    # ==========================================
-    # 5. 우선순위에 따른 네오픽셀 패턴 출력
-    # ==========================================
+    # LED 출력 상태 업데이트
     if danger_detected:
         show_strobe_red()
     elif is_waiting:
         show_breathing_orange()
     else:
-        set_all_color(0, 50, 100) # 평상시 (하늘색)
+        set_all_color(0, 50, 100) # 대기 중 (하늘색)
         
-    time.sleep_ms(20) # 애니메이션 자연스럽게 구동
+    time.sleep_ms(20)
