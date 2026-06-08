@@ -1,19 +1,26 @@
 import time
 from machine import I2C, Pin
-import neopixel
+from neopixel import NeoPixel
 
 # ==========================================
-# 1. 하드웨어 및 네오픽셀 설정 (GP16, I2C1 사용)
+# 0. 개발용 테스트 설정
 # ==========================================
-NUM_LEDS = 8
+TEST_MODE_ANY_OBJECT = True 
+PERSON_ID = 1
+
+# ==========================================
+# 1. WS2813 Mini 전용 네오픽셀 설정 (사용자 하드웨어 적용)
+# ==========================================
+NUM_LEDS = 10
 NEO_PIN = 16  # 네오픽셀 GP16 연결
-np = neopixel.NeoPixel(Pin(NEO_PIN), NUM_LEDS)
+TIMING = (280, 515, 515, 745)  # ⚠️ WS2813 Mini 전용 타이밍 적용!
+np = NeoPixel(Pin(NEO_PIN), NUM_LEDS, timing=TIMING)
 
 # I2C1 설정 (SDA=GP6, SCL=GP7)
 i2c_bus = I2C(1, sda=Pin(6), scl=Pin(7), freq=100000)
 
 # ==========================================
-# 2. 허스키렌즈 기본 통신 클래스
+# 2. 허스키렌즈 초정밀 동적 I2C 통신 클래스
 # ==========================================
 class HuskyLensI2C:
     def __init__(self, i2c_bus, address=0x32):
@@ -56,21 +63,23 @@ class HuskyLensI2C:
 lens = HuskyLensI2C(i2c_bus)
 
 def set_color(r, g, b):
-    """네오픽셀 전체 색상을 즉시 변경하는 함수"""
+    """네오픽셀 전체 색상을 즉시 변경하는 함수 (10개 LED 전부 제어)"""
     for i in range(NUM_LEDS):
         np[i] = (r, g, b)
     np.write()
 
-# 시작할 때 꺼짐 상태로 세팅
+# 시작할 때 부팅 완료 신호로 초록색(0, 100, 0)을 잠깐 켰다 끕니다.
+set_color(0, 100, 0)
+time.sleep(0.5)
 set_color(0, 0, 0)
 time.sleep(0.5)
 
-print("초간단 실시간 수치 매핑 시작...")
+print("WS2813 Mini 세팅 완료! 실시간 수치 매핑 제어 시작...")
 
 while True:
     blocks = lens.get_blocks()
     
-    # 기본 색상: 화면에 아무것도 잡히지 않을 때는 하늘색(Cyan)
+    # 기본 색상: 화면에 아무것도 잡히지 않을 때는 기본 대기 하늘색 (0, 50, 100)
     r, g, b = 0, 50, 100 
     
     if len(blocks) > 0:
@@ -85,9 +94,10 @@ while True:
             # 30 ~ 80 사이면 무조건 주황색 (Orange)
             r, g, b = 255, 80, 0
     else:
+        # 화면에 아무것도 잡히지 않을 때 콘솔 출력
         print("화면에 아무것도 없음")
         
-    # 결정된 색상을 네오픽셀에 즉시 적용
+    # 결정된 색상을 WS2813 Mini에 즉시 업데이트
     set_color(r, g, b)
     
-    time.sleep_ms(50)  # 0.05초마다 초고속으로 업데이트
+    time.sleep_ms(50)  # 0.05초마다 초고속 업데이트
