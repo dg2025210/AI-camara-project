@@ -5,22 +5,22 @@ from neopixel import NeoPixel
 # ==========================================
 # 0. 개발용 테스트 설정
 # ==========================================
-TEST_MODE_ANY_OBJECT = True 
-PERSON_ID = 1
+TEST_MODE_ANY_OBJECT = False   # 실전 모드 (학습된 대상만 인식)
+TARGET_IDS = [1, 2, 3]         # ★ 인식할 대상들의 ID 목록 (사람, 자전거, 킥보드 등)
 
 # ==========================================
-# 1. WS2813 Mini 전용 네오픽셀 설정 (사용자 하드웨어 적용)
+# 1. WS2813 Mini 네오픽셀 설정
 # ==========================================
 NUM_LEDS = 10
-NEO_PIN = 16  # 네오픽셀 GP16 연결
-TIMING = (280, 515, 515, 745)  # ⚠️ WS2813 Mini 전용 타이밍 적용!
+NEO_PIN = 16
+TIMING = (280, 515, 515, 745)  # WS2813 Mini 전용 타이밍
 np = NeoPixel(Pin(NEO_PIN), NUM_LEDS, timing=TIMING)
 
 # I2C1 설정 (SDA=GP6, SCL=GP7)
 i2c_bus = I2C(1, sda=Pin(6), scl=Pin(7), freq=100000)
 
 # ==========================================
-# 2. 허스키렌즈 초정밀 동적 I2C 통신 클래스
+# 2. 허스키렌즈 I2C 통신 클래스
 # ==========================================
 class HuskyLensI2C:
     def __init__(self, i2c_bus, address=0x32):
@@ -49,7 +49,7 @@ class HuskyLensI2C:
                 blk_payload_len = blk_header[3]
                 blk_payload = self.i2c.readfrom(self.address, blk_payload_len + 1)
                 
-                if blk_header[4] == 0x2A: # Block 감지
+                if blk_header[4] == 0x2A:
                     x = blk_payload[0] + (blk_payload[1] << 8)
                     y = blk_payload[2] + (blk_payload[3] << 8)
                     w = blk_payload[4] + (blk_payload[5] << 8)
@@ -63,41 +63,36 @@ class HuskyLensI2C:
 lens = HuskyLensI2C(i2c_bus)
 
 def set_color(r, g, b):
-    """네오픽셀 전체 색상을 즉시 변경하는 함수 (10개 LED 전부 제어)"""
     for i in range(NUM_LEDS):
         np[i] = (r, g, b)
     np.write()
 
-# 시작할 때 부팅 완료 신호로 초록색(0, 100, 0)을 잠깐 켰다 끕니다.
+# 부팅 신호
 set_color(0, 100, 0)
 time.sleep(0.5)
 set_color(0, 0, 0)
 time.sleep(0.5)
 
-print("WS2813 Mini 세팅 완료! 실시간 수치 매핑 제어 시작...")
+print("다중 객체 인식 모드 시작...")
 
 while True:
     blocks = lens.get_blocks()
     
-    # 기본 색상: 화면에 아무것도 잡히지 않을 때는 기본 대기 하늘색 (0, 50, 100)
+    # 기본 색상: 하늘색 (대기)
     r, g, b = 0, 50, 100 
     
-    if len(blocks) > 0:
-        # 화면에 잡힌 첫 번째 물체의 가로 크기(width) 가져오기
-        width = blocks[0]['width']
-        print(f"실시간 수치 감지 중 -> 크기: {width}")
-        
-        if width > 80:
-            # 80보다 크면 무조건 빨간색 (Red)
-            r, g, b = 255, 0, 0
-        elif 30 <= width <= 80:
-            # 30 ~ 80 사이면 무조건 주황색 (Orange)
-            r, g, b = 255, 80, 0
-    else:
-        # 화면에 아무것도 잡히지 않을 때 콘솔 출력
-        print("화면에 아무것도 없음")
-        
-    # 결정된 색상을 WS2813 Mini에 즉시 업데이트
+    for obj in blocks:
+        # ★ obj의 ID가 우리가 정한 TARGET_IDS 목록 안에 있는지 확인!
+        if TEST_MODE_ANY_OBJECT or (obj['id'] in TARGET_IDS):
+            width = obj['width']
+            # 어떤 종류(ID)가 감지되었는지 함께 출력
+            print(f"감지! 종류 ID: {obj['id']}, 크기(width): {width}")
+            
+            if width > 80:
+                r, g, b = 255, 0, 0   # 위험: 빨간색
+                break  # 위험이 감지되면 즉시 중단
+            elif 30 <= width <= 80:
+                r, g, b = 255, 80, 0  # 정체: 주황색
+                
     set_color(r, g, b)
-    
-    time.sleep_ms(50)  # 0.05초마다 초고속 업데이트
+    time.sleep_ms(50)
